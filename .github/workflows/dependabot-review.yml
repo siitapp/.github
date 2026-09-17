@@ -46,6 +46,13 @@ permissions: {}
 jobs:
   review:
     runs-on: ubuntu-latest
+    # One review per PR at a time. Without this a synchronize can start a
+    # second review while the first is still running, and whichever finishes
+    # last overwrites the shared comment -- possibly with the older SHA's
+    # findings.
+    concurrency:
+      group: dependabot-review-${{ github.repository }}-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
     timeout-minutes: 30
     permissions:
       contents: read # read the checked-out tree
@@ -81,6 +88,11 @@ jobs:
         uses: anthropics/claude-code-action@8b0802f646b2a579671cf49fbf23f4ad5f591f82 # v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # Without this the action mints its own App token, whose defaults are
+          # contents/pull_requests/issues: write, and additional_permissions
+          # merges with those rather than narrowing them. Handing it this job's
+          # token is what actually holds it to contents: read.
+          github_token: ${{ github.token }}
           allowed_bots: dependabot[bot]
           track_progress: true
           use_sticky_comment: true
@@ -100,9 +112,11 @@ jobs:
             Work in this order.
 
             1. Inventory every version change. Read the version table in the PR
-               body, then diff the lockfile, because a bump of one package often
-               drags a transitive major that the PR body never mentions. List
-               every major, and every minor whose notes mention behaviour.
+               body, then read the lockfile hunks in `gh pr diff`, because a bump
+               of one package often drags a transitive major that the PR body
+               never mentions, and the table can disagree with the lock after a
+               rebase. Trust the lock. List every major, and every minor whose
+               notes mention behaviour.
 
             2. For each of those, fetch the upstream notes rather than recalling
                them: `gh release view <tag> --repo <org>/<repo>`, the project's
@@ -148,6 +162,9 @@ jobs:
 
             Then post ONE comment:
 
+            - The head SHA above on the first line, so a reader can tell whether
+              the review matches the commit they are looking at. This comment is
+              reused across pushes, so an unlabelled one is ambiguous.
             - A one-line verdict, phrased as coverage rather than a guarantee:
               "no issues found within reviewed coverage", "merge with follow-up",
               or "hold". You are not certifying the bump is safe. Choose by what
@@ -173,16 +190,18 @@ jobs:
           # back, and the denials are what actually bound the agent. permission-
           # mode does not accumulate, so `default` here overrides the acceptEdits
           # tag mode sets, and anything falling through to "ask" is denied in a
-          # headless run. disallowedTools then revokes tag mode's git mutation
-          # tools, deny winning over allow. The token is `contents: read`, so a
-          # push could not land even if all of this were wrong.
+          # headless run. git is denied wholesale rather than allow-listed per
+          # subcommand: `git log`/`diff`/`show` take `--output=<path>`, which
+          # creates or truncates any file the runner can reach, so an allow-list
+          # of read-sounding subcommands does not make the tree read-only. The
+          # diff comes from `gh pr diff`, which has no file-output flag.
           claude_args: |
             --model ${{ inputs.model }}
             --max-turns ${{ inputs.max_turns }}
             --setting-sources user
             --permission-mode default
-            --allowedTools "Read,Grep,Glob,WebFetch,Bash(git log *),Bash(git diff *),Bash(git show *),Bash(gh pr view *),Bash(gh pr diff *),Bash(gh release view *),Bash(gh release list *)"
-            --disallowedTools "Edit,MultiEdit,Write,NotebookEdit,Bash(git add:*),Bash(git commit:*),Bash(git rm:*),Bash(git push:*),Bash(git checkout:*),Bash(git reset:*),Bash(git restore:*),mcp__github_file_ops__commit_files,mcp__github_file_ops__delete_files"
+            --allowedTools "Read,Grep,Glob,WebFetch,Bash(gh pr view *),Bash(gh pr diff *),Bash(gh release view *),Bash(gh release list *)"
+            --disallowedTools "Edit,MultiEdit,Write,NotebookEdit,Bash(git:*),mcp__github_file_ops__commit_files,mcp__github_file_ops__delete_files"
 
       # The agent cannot be relied on to report its own truncation: a hard turn
       # limit, a timeout or a crash leaves the tracking comment mid-review with
@@ -194,8 +213,9 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           TARGET_REPO: ${{ github.repository }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           gh pr comment "$PR_NUMBER" --repo "$TARGET_REPO" --body \
-          "**Dependency review did not complete.** It hit the turn limit, timed out, or failed.
+          "**Dependency review did not complete** for \`$HEAD_SHA\`. It hit the turn limit, timed out, or failed.
 
           Treat any review comment above as partial: the packages it does not mention were not necessarily checked. Run log: $RUN_URL"

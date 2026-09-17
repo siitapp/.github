@@ -66,12 +66,20 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      # track_progress forces tag mode, which is the only mode that creates and
+      # then updates a tracking comment: supplying `prompt` alone selects agent
+      # mode, which posts nothing at all. Tag mode still honours this prompt,
+      # appending it to its own as <custom_instructions>.
       - name: Review the bump
+        id: review
+        # Step-level, so a hung review is killed with the job still alive to run
+        # the fallback below. A job-level timeout would cancel that too.
+        timeout-minutes: 25
         uses: anthropics/claude-code-action@8b0802f646b2a579671cf49fbf23f4ad5f591f82 # v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           allowed_bots: dependabot[bot]
-          use_sticky_comment: true
+          track_progress: true
           additional_permissions: |
             actions: read
           prompt: |
@@ -158,4 +166,21 @@ jobs:
           claude_args: |
             --model ${{ inputs.model }}
             --max-turns ${{ inputs.max_turns }}
-            --allowedTools "Read,Grep,Glob,WebFetch,Bash(git log *),Bash(git diff *),Bash(git show *),Bash(gh pr view *),Bash(gh pr diff *),Bash(gh release view *),Bash(gh release list *),Bash(curl *)"
+            --setting-sources user
+            --allowedTools "Read,Grep,Glob,WebFetch,Bash(git log *),Bash(git diff *),Bash(git show *),Bash(gh pr view *),Bash(gh pr diff *),Bash(gh release view *),Bash(gh release list *)"
+
+      # The agent cannot be relied on to report its own truncation: a hard turn
+      # limit, a timeout or a crash leaves the tracking comment mid-review with
+      # no verdict. This says so from outside the agent.
+      - name: Flag an incomplete review
+        if: always() && (steps.review.outcome != 'success' || steps.review.outputs.conclusion != 'success')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          TARGET_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gh pr comment "$PR_NUMBER" --repo "$TARGET_REPO" --body \
+          "**Dependency review did not complete.** It hit the turn limit, timed out, or failed.
+
+          Treat any review comment above as partial: the packages it does not mention were not necessarily checked. Run log: $RUN_URL"

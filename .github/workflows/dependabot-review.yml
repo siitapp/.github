@@ -99,18 +99,33 @@ jobs:
 
             3. Map each documented change onto THIS repo. Grep for every import,
                subclass, override, decorator and settings key belonging to the
-               bumped package. A change matters only if it touches code we have.
-               Private hooks we subclass deserve particular attention: confirm
-               each still exists with the same signature at the new version.
+               bumped package. Private hooks we subclass deserve particular
+               attention: confirm each still exists with the same signature at
+               the new version.
 
-            4. Single out changes that alter runtime behaviour without breaking a
+            4. Then work the other way round, because the change that bites is
+               usually in a default we inherit rather than in code we wrote, and
+               step 3 alone will not find it. For every subsystem the notes touch
+               that this repo configures at all -- auth providers and the values
+               handed to them, middleware, transport and session settings,
+               serialisation -- work out what the library now does BY DEFAULT
+               given our configuration values, and what it did before. Read the
+               new library source where the notes are vague. Watch values that
+               propagate through a wrapper or a composition: a scope list, an
+               audience, a timeout passed to one object and re-derived by
+               another, where our value meets new library behaviour. A header,
+               challenge, payload or error the library emits on our behalf is our
+               behaviour, even though no line in this repo produces it, and no
+               grep of our tree will surface it.
+
+            5. Single out changes that alter runtime behaviour without breaking a
                build or a test: emitted headers, auth challenges and scopes,
                default arguments, middleware dispatch, wire formats and error
                codes, serialisation, timeouts and limits. For each, say
                concretely what a client or an operator would observe, and name
                the check that would catch it.
 
-            5. Never install, build or execute any dependency, at either version,
+            6. Never install, build or execute any dependency, at either version,
                and never run the project's own code. This job holds a write token
                and credentials, and the package you are reviewing is exactly the
                thing that might be compromised. Your evidence is the upstream

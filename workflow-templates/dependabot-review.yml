@@ -46,10 +46,8 @@ jobs:
     # would otherwise leave the review job with no token at all.
     permissions:
       contents: read # read the checked-out tree
-      pull-requests: write # post and update the sticky review comment
-      issues: read # read linked issue context
+      pull-requests: write # post and update the review comment
       actions: read # let the agent read this PR's CI results
-      id-token: write # OIDC identity for the Claude action
     # zizmor: ignore[unpinned-uses] first-party org workflow, deliberately
     # tracked on main: hash-pinning it would mean a PR in every repo each time
     # the shared prompt changes, which is the point of centralising it.

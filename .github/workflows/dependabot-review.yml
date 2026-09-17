@@ -12,9 +12,7 @@
 #       permissions: # required on the caller: a called workflow can only
 #         contents: read # downgrade the token it is given, never elevate it
 #         pull-requests: write
-#         issues: read
 #         actions: read
-#         id-token: write
 #       uses: siitapp/.github/.github/workflows/dependabot-review.yml@main
 #       secrets:
 #         CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -46,77 +44,70 @@ permissions: {}
 jobs:
   review:
     runs-on: ubuntu-latest
-    # One review per PR at a time. Without this a synchronize can start a
-    # second review while the first is still running, and whichever finishes
-    # last overwrites the shared comment -- possibly with the older SHA's
-    # findings.
+    # One review per PR at a time. Without this a synchronize can start a second
+    # review while the first is still running, and whichever finishes last wins
+    # the comment -- possibly with the older SHA's findings.
     concurrency:
       group: dependabot-review-${{ github.repository }}-${{ github.event.pull_request.number }}
       cancel-in-progress: true
-    timeout-minutes: 30
     permissions:
       contents: read # read the checked-out tree
-      pull-requests: write # post and update the sticky review comment
-      issues: read # read linked issue context
+      pull-requests: write # post and update the review comment
       actions: read # let the agent read this PR's CI results
-      id-token: write # OIDC identity for the Claude action
     steps:
       # pull_request_target runs in the base-branch context, so this checkout is
-      # the only place PR content enters the job, and this job is privileged:
-      # it can comment and it holds the agent's credentials. The tree is read
-      # and grepped, never installed, built or executed: no package manager or
-      # interpreter is allowed, edits are not auto-approved, and the mutation
-      # tools tag mode adds are denied below. A behavioural probe of a bumped
-      # dependency belongs in an unprivileged job, not here.
+      # the only place PR content enters the job, and this job is privileged: it
+      # can comment and it holds the agent's credentials. The tree is read and
+      # grepped, never installed, built or executed. A behavioural probe of a
+      # bumped dependency belongs in an unprivileged job, not here.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: refs/pull/${{ github.event.pull_request.number }}/merge
           fetch-depth: 0
           persist-credentials: false
 
-      # track_progress forces tag mode, the only mode that creates a tracking
-      # comment: supplying `prompt` alone selects agent mode, which posts
-      # nothing at all. Tag mode still honours this prompt, appending it to its
-      # own as <custom_instructions>. use_sticky_comment is what makes a later
-      # run reuse that comment; track_progress alone only updates it within a
-      # single run, so a re-review on every synchronize would pile up comments.
+      # Agent mode (a prompt with no track_progress). It posts nothing itself,
+      # which is what we want: the comment is assembled and upserted below under
+      # a marker this workflow owns. Tag mode's tracking comment cannot be
+      # reused across runs here -- its reuse test matches the Claude app's bot
+      # id, a login containing "claude", or a byte-identical initial body that
+      # embeds the run URL, and none of those hold for github-actions[bot].
       - name: Review the bump
         id: review
-        # Step-level, so a hung review is killed with the job still alive to run
-        # the fallback below. A job-level timeout would cancel that too.
+        # Step-level, so a hung review is killed with the job still alive to
+        # comment. A job-level timeout would cancel that too.
         timeout-minutes: 25
         uses: anthropics/claude-code-action@8b0802f646b2a579671cf49fbf23f4ad5f591f82 # v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          allowed_bots: dependabot[bot]
           # Without this the action mints its own App token, whose defaults are
           # contents/pull_requests/issues: write, and additional_permissions
           # merges with those rather than narrowing them. Handing it this job's
           # token is what actually holds it to contents: read.
           github_token: ${{ github.token }}
-          allowed_bots: dependabot[bot]
-          track_progress: true
-          use_sticky_comment: true
-          additional_permissions: |
-            actions: read
           prompt: |
             REPO: ${{ github.repository }}
             PR NUMBER: ${{ github.event.pull_request.number }}
             BASE SHA: ${{ github.event.pull_request.base.sha }}
             HEAD SHA: ${{ github.event.pull_request.head.sha }}
 
-            You are reviewing a Dependabot dependency bump. Judge RISK, not style.
-            Green CI is not evidence of safety: the failure mode that matters here
-            is a dependency whose runtime behaviour changed in a way our test
-            suite never exercises.
+            You are reviewing a Dependabot dependency bump. Judge RISK, not
+            style. Green CI is not evidence of safety: the failure mode that
+            matters here is a dependency whose runtime behaviour changed in a
+            way our test suite never exercises.
 
             Work in this order.
 
             1. Inventory every version change. Read the version table in the PR
-               body, then read the lockfile hunks in `gh pr diff`, because a bump
-               of one package often drags a transitive major that the PR body
-               never mentions, and the table can disagree with the lock after a
-               rebase. Trust the lock. List every major, and every minor whose
-               notes mention behaviour.
+               body, then read the lockfile hunks in `gh pr diff`, because a
+               bump of one package often drags a transitive major the body never
+               mentions, and the table can disagree with the lock after a
+               rebase. Trust the lock. Size is not severity and a patch is not
+               automatically safe: a patch release can turn on a new default, a
+               new guard, or a stricter check. Carry forward every major, and
+               every minor OR patch whose notes mention behaviour, defaults,
+               security hardening, or validation.
 
             2. For each of those, fetch the upstream notes rather than recalling
                them: `gh release view <tag> --repo <org>/<repo>`, the project's
@@ -131,91 +122,117 @@ jobs:
 
             4. Then work the other way round, because the change that bites is
                usually in a default we inherit rather than in code we wrote, and
-               step 3 alone will not find it. For every subsystem the notes touch
-               that this repo configures at all -- auth providers and the values
-               handed to them, middleware, transport and session settings,
-               serialisation -- work out what the library now does BY DEFAULT
-               given our configuration values, and what it did before. Read the
-               new library source where the notes are vague. Watch values that
-               propagate through a wrapper or a composition: a scope list, an
-               audience, a timeout passed to one object and re-derived by
-               another, where our value meets new library behaviour. A header,
-               challenge, payload or error the library emits on our behalf is our
-               behaviour, even though no line in this repo produces it, and no
-               grep of our tree will surface it.
+               step 3 alone will not find it. For every subsystem the notes
+               touch that this repo configures at all -- auth providers and the
+               values handed to them, middleware, transport and session
+               settings, serialisation -- work out what the library now does BY
+               DEFAULT given our configuration values, and what it did before.
+               Read the new library source where the notes are vague. Watch
+               values that propagate through a wrapper or a composition: a scope
+               list, an audience, a timeout passed to one object and re-derived
+               by another, where our value meets new library behaviour. A
+               header, challenge, payload or error the library emits on our
+               behalf is our behaviour, even though no line in this repo
+               produces it, and no grep of our tree will surface it.
 
-            5. Single out changes that alter runtime behaviour without breaking a
-               build or a test: emitted headers, auth challenges and scopes,
+            5. Single out changes that alter runtime behaviour without breaking
+               a build or a test: emitted headers, auth challenges and scopes,
                default arguments, middleware dispatch, wire formats and error
                codes, serialisation, timeouts and limits. For each, say
                concretely what a client or an operator would observe, and name
                the check that would catch it.
 
-            6. Never install, build or execute any dependency, at either version,
-               and never run the project's own code. This job holds a write token
-               and credentials, and the package you are reviewing is exactly the
-               thing that might be compromised. Your evidence is the upstream
-               notes, the published source, and our tree. When a question would
-               genuinely be settled by running something, put the exact commands
-               in your comment for a human to run locally, and mark the finding
-               unverified.
+            6. Never install, build or execute any dependency, at either
+               version, and never run the project's own code. This job holds a
+               write-capable comment token and the agent's credentials, and the
+               package you are reviewing is exactly the thing that might be
+               compromised. Your evidence is the upstream notes, the published
+               source, and our tree. When a question would genuinely be settled
+               by running something, put the exact commands in your answer for a
+               human to run locally, and mark the finding unverified.
 
-            Then post ONE comment:
+            Your final message IS the review comment, in markdown. Produce:
 
-            - The head SHA above on the first line, so a reader can tell whether
-              the review matches the commit they are looking at. This comment is
-              reused across pushes, so an unlabelled one is ambiguous.
             - A one-line verdict, phrased as coverage rather than a guarantee:
-              "no issues found within reviewed coverage", "merge with follow-up",
-              or "hold". You are not certifying the bump is safe. Choose by what
-              your findings actually demand, not by how much you found: if every
-              finding ends in "nothing to do", the verdict is the first one even
-              when the observations were worth writing down. Reserve the second
-              for work someone has to schedule, and the third for something that
-              should stop the merge.
+              "no issues found within reviewed coverage", "merge with
+              follow-up", or "hold". You are not certifying the bump is safe.
+              Choose by what your findings actually demand, not by how much you
+              found: if every finding ends in "nothing to do", the verdict is
+              the first one even when the observations were worth writing down.
+              Reserve the second for work someone has to schedule, and the third
+              for something that should stop the merge.
             - Findings ordered by severity. Each names the upstream note that
               caused it, the file in this repo it lands on, and what to do.
             - A short list of packages you checked and found clean. Say so
               explicitly rather than staying silent, so a reader can tell
               coverage from omission.
             - Anything you could not verify, marked as such.
-            - If you ran out of turns, say so in the first line and list what you
-              had not reached. Truncated coverage reported as a clean result is
-              the worst outcome here.
+            - If you ran out of turns, say so in the first line and list what
+              you had not reached. Truncated coverage reported as a clean result
+              is the worst outcome here.
 
-            Be concise and concrete. No praise, no summary of the diff.
-          # These are appended after the ones tag mode injects for itself, which
-          # matters in two different ways. allowedTools accumulates, so the list
-          # below widens tag mode's rather than replacing it: it grants nothing
-          # back, and the denials are what actually bound the agent. permission-
-          # mode does not accumulate, so `default` here overrides the acceptEdits
-          # tag mode sets, and anything falling through to "ask" is denied in a
-          # headless run. git is denied wholesale rather than allow-listed per
-          # subcommand: `git log`/`diff`/`show` take `--output=<path>`, which
-          # creates or truncates any file the runner can reach, so an allow-list
-          # of read-sounding subcommands does not make the tree read-only. The
-          # diff comes from `gh pr diff`, which has no file-output flag.
+            Write nothing else: no preamble, no restatement of the diff.
+          # allowedTools is the whole allow-list in agent mode, which injects no
+          # tools of its own. permission-mode `default` denies anything falling
+          # through to "ask" in a headless run. git is denied wholesale rather
+          # than allow-listed per subcommand: `git log`/`diff`/`show` all take
+          # `--output=<path>`, which creates or truncates any file the runner
+          # can reach, so an allow-list of read-sounding subcommands would not
+          # make the tree read-only. The diff comes from `gh pr diff`, which has
+          # no file-output flag.
           claude_args: |
             --model ${{ inputs.model }}
             --max-turns ${{ inputs.max_turns }}
             --setting-sources user
             --permission-mode default
             --allowedTools "Read,Grep,Glob,WebFetch,Bash(gh pr view *),Bash(gh pr diff *),Bash(gh release view *),Bash(gh release list *)"
-            --disallowedTools "Edit,MultiEdit,Write,NotebookEdit,Bash(git:*),mcp__github_file_ops__commit_files,mcp__github_file_ops__delete_files"
+            --disallowedTools "Edit,MultiEdit,Write,NotebookEdit,Bash(git:*),Bash(gh pr comment *),Bash(gh api *)"
 
-      # The agent cannot be relied on to report its own truncation: a hard turn
-      # limit, a timeout or a crash leaves the tracking comment mid-review with
-      # no verdict. This says so from outside the agent.
-      - name: Flag an incomplete review
-        if: always() && (steps.review.outcome != 'success' || steps.review.outputs.conclusion != 'success')
+      # One comment per PR, identified by a marker this workflow owns rather
+      # than by who authored it or what it happens to say. Always runs, so a
+      # review that hit the turn limit, timed out or crashed still says so
+      # instead of leaving the previous run's verdict standing against a new
+      # commit.
+      - name: Publish the review
+        if: always()
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           TARGET_REPO: ${{ github.repository }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          EXECUTION_FILE: ${{ steps.review.outputs.execution_file }}
+          CONCLUSION: ${{ steps.review.outputs.conclusion }}
+          OUTCOME: ${{ steps.review.outcome }}
         run: |
-          gh pr comment "$PR_NUMBER" --repo "$TARGET_REPO" --body \
-          "**Dependency review did not complete** for \`$HEAD_SHA\`. It hit the turn limit, timed out, or failed.
+          set -euo pipefail
+          marker="<!-- siit:dependabot-review -->"
+          body_file="$RUNNER_TEMP/review-comment.md"
 
-          Treat any review comment above as partial: the packages it does not mention were not necessarily checked. Run log: $RUN_URL"
+          review=""
+          if [ "$OUTCOME" = "success" ] && [ "$CONCLUSION" = "success" ] \
+             && [ -n "$EXECUTION_FILE" ] && [ -f "$EXECUTION_FILE" ]; then
+            review=$(jq -r '[.[] | select(.type == "result") | .result // empty] | last // empty' "$EXECUTION_FILE")
+          fi
+
+          {
+            printf '%s\n' "$marker"
+            printf 'Dependency review of `%s` — [run log](%s)\n\n' "$HEAD_SHA" "$RUN_URL"
+            if [ -n "$review" ]; then
+              printf '%s\n' "$review"
+            else
+              printf '**This review did not complete.** It hit the turn limit, timed out, or failed.\n\n'
+              printf 'Treat this commit as unreviewed: nothing here was checked.\n'
+            fi
+          } > "$body_file"
+
+          existing=$(gh api --paginate "repos/$TARGET_REPO/issues/$PR_NUMBER/comments" \
+            --jq "[.[] | select(.body | startswith(\"$marker\")) | .id] | first // empty")
+
+          if [ -n "$existing" ]; then
+            gh api -X PATCH "repos/$TARGET_REPO/issues/comments/$existing" -F body=@"$body_file" >/dev/null
+            echo "updated comment $existing"
+          else
+            gh api -X POST "repos/$TARGET_REPO/issues/$PR_NUMBER/comments" -F body=@"$body_file" >/dev/null
+            echo "created comment"
+          fi

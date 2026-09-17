@@ -123,7 +123,12 @@ jobs:
 
             - A one-line verdict, phrased as coverage rather than a guarantee:
               "no issues found within reviewed coverage", "merge with follow-up",
-              or "hold". You are not certifying the bump is safe.
+              or "hold". You are not certifying the bump is safe. Choose by what
+              your findings actually demand, not by how much you found: if every
+              finding ends in "nothing to do", the verdict is the first one even
+              when the observations were worth writing down. Reserve the second
+              for work someone has to schedule, and the third for something that
+              should stop the merge.
             - Findings ordered by severity. Each names the upstream note that
               caused it, the file in this repo it lands on, and what to do.
             - A short list of packages you checked and found clean. Say so

@@ -1,0 +1,6 @@
+{
+  "name": "Dependabot review",
+  "description": "Agent risk review of Dependabot PRs: cross-references upstream changelogs against this repo's usage surface and comments on the PR.",
+  "iconName": "octicon dependabot",
+  "categories": ["Automation", "Dependency management"]
+}

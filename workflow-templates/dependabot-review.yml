@@ -1,0 +1,56 @@
+# Runs an agent risk review on Dependabot pull requests.
+#
+# Two gates keep this off the ~90% of our PRs that humans open. The paths
+# filter below is evaluated before a run is created, so a PR touching no
+# dependency manifest produces nothing at all: no run, no check, no row in the
+# Actions tab. The job's `if` then skips the few human PRs that do touch a
+# lockfile, and a skipped job never allocates a runner. Only Dependabot PRs
+# reach the shared workflow.
+#
+# pull_request_target (not pull_request) because Dependabot-triggered runs get a
+# read-only token and cannot see Actions secrets, so the job could neither
+# authenticate the agent nor post its comment. The gate is on the PR *author*,
+# which is stable when a human pushes a follow-up commit onto the branch and is
+# not settable from a fork.
+name: Dependabot review
+
+# The job below runs only when the PR author is dependabot[bot], whose branches
+# live in this repo rather than a fork, and the shared workflow reads the tree
+# without ever executing it.
+on: # zizmor: ignore[dangerous-triggers]
+  pull_request_target:
+    types: [opened, synchronize]
+    paths:
+      - '**/uv.lock'
+      - '**/pyproject.toml'
+      - '**/poetry.lock'
+      - '**/requirements*.txt'
+      - '**/package.json'
+      - '**/package-lock.json'
+      - '**/yarn.lock'
+      - '**/pnpm-lock.yaml'
+      - '**/Gemfile'
+      - '**/Gemfile.lock'
+      - '**/*.gemspec'
+      - '**/Dockerfile*'
+      - '**/.terraform.lock.hcl'
+      - '.github/workflows/**'
+
+permissions: {}
+
+jobs:
+  review:
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    # A called workflow can only downgrade its caller's token, never elevate it,
+    # so these must be granted here: the workflow-level `permissions: {}` above
+    # would otherwise leave the review job with no token at all.
+    permissions:
+      contents: read # read the checked-out tree
+      pull-requests: write # post and update the review comment
+      actions: read # let the agent read this PR's CI results
+    # zizmor: ignore[unpinned-uses] first-party org workflow, deliberately
+    # tracked on main: hash-pinning it would mean a PR in every repo each time
+    # the shared prompt changes, which is the point of centralising it.
+    uses: siitapp/.github/.github/workflows/dependabot-review.yml@main
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}

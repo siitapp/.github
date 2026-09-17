@@ -1,0 +1,123 @@
+# Agent review of Dependabot pull requests, shared by every siitapp repo.
+#
+# Calling repos add a stub (see workflow-templates/dependabot-review.yml):
+#
+#   on:
+#     pull_request_target:
+#       types: [opened, synchronize]
+#       paths: ['**/uv.lock', '**/package-lock.json', ...]
+#   jobs:
+#     review:
+#       if: github.event.pull_request.user.login == 'dependabot[bot]'
+#       uses: siitapp/.github/.github/workflows/dependabot-review.yml@main
+#       secrets:
+#         CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+#
+# The paths filter stops GitHub creating a run for PRs that touch no manifest;
+# the caller's `if` skips the job for human-authored ones. Neither consumes
+# runner minutes, so only Dependabot PRs reach this workflow.
+name: Dependabot dependency review
+
+on:
+  workflow_call:
+    inputs:
+      model:
+        description: Model passed to the Claude CLI.
+        type: string
+        default: claude-opus-5
+      max_turns:
+        description: Upper bound on agent turns, to cap the cost of one review.
+        type: number
+        default: 60
+    # Explicit rather than `secrets: inherit` (zizmor secrets-inherit): the
+    # caller passes exactly what this workflow reads.
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN:
+        required: true
+
+permissions: {}
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read # read the checked-out tree
+      pull-requests: write # post and update the sticky review comment
+      issues: read # read linked issue context
+      actions: read # let the agent read this PR's CI results
+      id-token: write # OIDC identity for the Claude action
+    steps:
+      # pull_request_target runs in the base-branch context, so this checkout is
+      # the only place PR content enters the job. Nothing here installs or
+      # executes it: the agent reads and greps the tree, and Dependabot branches
+      # live in the repo itself, never a fork.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/pull/${{ github.event.pull_request.number }}/merge
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Review the bump
+        uses: anthropics/claude-code-action@8b0802f646b2a579671cf49fbf23f4ad5f591f82 # v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          allowed_bots: dependabot[bot]
+          use_sticky_comment: true
+          additional_permissions: |
+            actions: read
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+            BASE SHA: ${{ github.event.pull_request.base.sha }}
+            HEAD SHA: ${{ github.event.pull_request.head.sha }}
+
+            You are reviewing a Dependabot dependency bump. Judge RISK, not style.
+            Green CI is not evidence of safety: the failure mode that matters here
+            is a dependency whose runtime behaviour changed in a way our test
+            suite never exercises.
+
+            Work in this order.
+
+            1. Inventory every version change. Read the version table in the PR
+               body, then diff the lockfile, because a bump of one package often
+               drags a transitive major that the PR body never mentions. List
+               every major, and every minor whose notes mention behaviour.
+
+            2. For each of those, fetch the upstream notes rather than recalling
+               them: `gh release view <tag> --repo <org>/<repo>`, the project's
+               changelog, and its upgrade guide when a major crosses. Read the
+               breaking-change and behaviour-change sections in full.
+
+            3. Map each documented change onto THIS repo. Grep for every import,
+               subclass, override, decorator and settings key belonging to the
+               bumped package. A change matters only if it touches code we have.
+               Private hooks we subclass deserve particular attention: confirm
+               each still exists with the same signature at the new version.
+
+            4. Single out changes that alter runtime behaviour without breaking a
+               build or a test: emitted headers, auth challenges and scopes,
+               default arguments, middleware dispatch, wire formats and error
+               codes, serialisation, timeouts and limits. For each, say
+               concretely what a client or an operator would observe, and name
+               the check that would catch it.
+
+            5. When a claim is cheap to verify, verify it. Installing both
+               versions in a scratch venv and comparing the behaviour in question
+               is worth far more than reasoning from a changelog line.
+
+            Then post ONE comment:
+
+            - A one-line verdict: safe to merge, merge with follow-up, or hold.
+            - Findings ordered by severity. Each names the upstream note that
+              caused it, the file in this repo it lands on, and what to do.
+            - A short list of packages you checked and found clean. Say so
+              explicitly rather than staying silent, so a reader can tell
+              coverage from omission.
+            - Anything you could not verify, marked as such.
+
+            Be concise and concrete. No praise, no summary of the diff.
+          claude_args: |
+            --model ${{ inputs.model }}
+            --max-turns ${{ inputs.max_turns }}
+            --allowedTools "Read,Grep,Glob,WebFetch,Bash(git *),Bash(gh pr view *),Bash(gh pr diff *),Bash(gh release view *),Bash(gh api *),Bash(curl *),Bash(uv *),Bash(python *)"

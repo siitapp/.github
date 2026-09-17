@@ -49,9 +49,11 @@ jobs:
       id-token: write # OIDC identity for the Claude action
     steps:
       # pull_request_target runs in the base-branch context, so this checkout is
-      # the only place PR content enters the job. Nothing here installs or
-      # executes it: the agent reads and greps the tree, and Dependabot branches
-      # live in the repo itself, never a fork.
+      # the only place PR content enters the job, and this job is privileged:
+      # it holds a write token and the agent's credentials. The tree is read and
+      # grepped, never installed, built or executed, and the agent is given no
+      # package-manager or interpreter tools to do so with. A behavioural probe
+      # of a bumped dependency belongs in an unprivileged job, not here.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: refs/pull/${{ github.event.pull_request.number }}/merge
@@ -102,22 +104,32 @@ jobs:
                concretely what a client or an operator would observe, and name
                the check that would catch it.
 
-            5. When a claim is cheap to verify, verify it. Installing both
-               versions in a scratch venv and comparing the behaviour in question
-               is worth far more than reasoning from a changelog line.
+            5. Never install, build or execute any dependency, at either version,
+               and never run the project's own code. This job holds a write token
+               and credentials, and the package you are reviewing is exactly the
+               thing that might be compromised. Your evidence is the upstream
+               notes, the published source, and our tree. When a question would
+               genuinely be settled by running something, put the exact commands
+               in your comment for a human to run locally, and mark the finding
+               unverified.
 
             Then post ONE comment:
 
-            - A one-line verdict: safe to merge, merge with follow-up, or hold.
+            - A one-line verdict, phrased as coverage rather than a guarantee:
+              "no issues found within reviewed coverage", "merge with follow-up",
+              or "hold". You are not certifying the bump is safe.
             - Findings ordered by severity. Each names the upstream note that
               caused it, the file in this repo it lands on, and what to do.
             - A short list of packages you checked and found clean. Say so
               explicitly rather than staying silent, so a reader can tell
               coverage from omission.
             - Anything you could not verify, marked as such.
+            - If you ran out of turns, say so in the first line and list what you
+              had not reached. Truncated coverage reported as a clean result is
+              the worst outcome here.
 
             Be concise and concrete. No praise, no summary of the diff.
           claude_args: |
             --model ${{ inputs.model }}
             --max-turns ${{ inputs.max_turns }}
-            --allowedTools "Read,Grep,Glob,WebFetch,Bash(git *),Bash(gh pr view *),Bash(gh pr diff *),Bash(gh release view *),Bash(gh api *),Bash(curl *),Bash(uv *),Bash(python *)"
+            --allowedTools "Read,Grep,Glob,WebFetch,Bash(git log *),Bash(git diff *),Bash(git show *),Bash(gh pr view *),Bash(gh pr diff *),Bash(gh release view *),Bash(gh release list *),Bash(curl *)"

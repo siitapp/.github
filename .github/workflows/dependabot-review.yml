@@ -56,20 +56,23 @@ jobs:
     steps:
       # pull_request_target runs in the base-branch context, so this checkout is
       # the only place PR content enters the job, and this job is privileged:
-      # it holds a write token and the agent's credentials. The tree is read and
-      # grepped, never installed, built or executed, and the agent is given no
-      # package-manager or interpreter tools to do so with. A behavioural probe
-      # of a bumped dependency belongs in an unprivileged job, not here.
+      # it can comment and it holds the agent's credentials. The tree is read
+      # and grepped, never installed, built or executed: no package manager or
+      # interpreter is allowed, edits are not auto-approved, and the mutation
+      # tools tag mode adds are denied below. A behavioural probe of a bumped
+      # dependency belongs in an unprivileged job, not here.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: refs/pull/${{ github.event.pull_request.number }}/merge
           fetch-depth: 0
           persist-credentials: false
 
-      # track_progress forces tag mode, which is the only mode that creates and
-      # then updates a tracking comment: supplying `prompt` alone selects agent
-      # mode, which posts nothing at all. Tag mode still honours this prompt,
-      # appending it to its own as <custom_instructions>.
+      # track_progress forces tag mode, the only mode that creates a tracking
+      # comment: supplying `prompt` alone selects agent mode, which posts
+      # nothing at all. Tag mode still honours this prompt, appending it to its
+      # own as <custom_instructions>. use_sticky_comment is what makes a later
+      # run reuse that comment; track_progress alone only updates it within a
+      # single run, so a re-review on every synchronize would pile up comments.
       - name: Review the bump
         id: review
         # Step-level, so a hung review is killed with the job still alive to run
@@ -80,6 +83,7 @@ jobs:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           allowed_bots: dependabot[bot]
           track_progress: true
+          use_sticky_comment: true
           additional_permissions: |
             actions: read
           prompt: |
@@ -163,11 +167,22 @@ jobs:
               the worst outcome here.
 
             Be concise and concrete. No praise, no summary of the diff.
+          # These are appended after the ones tag mode injects for itself, which
+          # matters in two different ways. allowedTools accumulates, so the list
+          # below widens tag mode's rather than replacing it: it grants nothing
+          # back, and the denials are what actually bound the agent. permission-
+          # mode does not accumulate, so `default` here overrides the acceptEdits
+          # tag mode sets, and anything falling through to "ask" is denied in a
+          # headless run. disallowedTools then revokes tag mode's git mutation
+          # tools, deny winning over allow. The token is `contents: read`, so a
+          # push could not land even if all of this were wrong.
           claude_args: |
             --model ${{ inputs.model }}
             --max-turns ${{ inputs.max_turns }}
             --setting-sources user
+            --permission-mode default
             --allowedTools "Read,Grep,Glob,WebFetch,Bash(git log *),Bash(git diff *),Bash(git show *),Bash(gh pr view *),Bash(gh pr diff *),Bash(gh release view *),Bash(gh release list *)"
+            --disallowedTools "Edit,MultiEdit,Write,NotebookEdit,Bash(git add:*),Bash(git commit:*),Bash(git rm:*),Bash(git push:*),Bash(git checkout:*),Bash(git reset:*),Bash(git restore:*),mcp__github_file_ops__commit_files,mcp__github_file_ops__delete_files"
 
       # The agent cannot be relied on to report its own truncation: a hard turn
       # limit, a timeout or a crash leaves the tracking comment mid-review with
